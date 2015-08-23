@@ -1,0 +1,16 @@
+<?php
+
+/**
+ * Implements hook_schema().
+ */
+function field_minipanel_schema() {
+  $schema['cache_field_minipanel'] = drupal_get_schema_unprocessed('system', 'cache');
+  return $schema;
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function field_minipanel_uninstall() {
+  variable_del('field_minipanel_settings');
+}

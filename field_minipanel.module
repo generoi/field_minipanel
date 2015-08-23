@@ -1,0 +1,255 @@
+<?php
+
+module_load_include('inc', 'field_minipanel' ,'field_minipanel.field');
+
+if (module_exists('commerce_product_reference')) {
+  module_load_include('inc', 'field_minipanel' ,'field_minipanel.commerce');
+}
+
+/**
+ * Implements hook_node_view().
+ *
+ * Ideally we would use hook_entity_view(), but too many modulees forget to invoke it.
+ */
+function field_minipanel_node_view($entity, $view_mode, $langcode) {
+  $entity_type = 'node';
+  list($entity_id, , $bundle) = entity_extract_ids($entity_type, $entity);
+  $extra_fields = _field_minipanel_get_fields($entity_type, $bundle, $view_mode);
+  // Exit early if there are no fields for this display.
+  if (empty($extra_fields)) {
+    return;
+  }
+  // If there's a product reference, cache more granularily, by product reference.
+  // @todo this doesnt take contexts into account, so cache bin might contain
+  // duplicates but the performance improvement is worth it.
+  $field_product = _field_minipanel_get_product_reference_field($entity_type, $bundle);
+  if ($field_product) {
+    // @todo language
+    $items = field_get_items($entity_type, $entity, $field_product);
+    $item = reset($items);
+    // On node views the product displayed is always the first one.
+    $product_id = $item['product_id'];
+    // If a product exists, use that in the cache key instead of the entity id.
+    $entity_id = $product_id;
+  }
+
+  $minipanels = &drupal_static(__FUNCTION__);
+  $cache_key = "$entity_type:$bundle:$entity_id:$view_mode";
+  $no_cache = FALSE;
+  if (!isset($minipanels)) {
+    $minipanels = array();
+  }
+  if (!isset($minipanels[$cache_key])) {
+    if ($cache = cache_get($cache_key, 'cache_field_minipanel')) {
+      $minipanels[$cache_key] = $cache->data;
+    }
+    else {
+      // Fetch the minipanels associated with the entity display.
+      $minipanels[$cache_key] = field_minipanel_get_minipanels($entity_type, $bundle, $view_mode);
+      ctools_include('context');
+      foreach ($minipanels[$cache_key] as $field_name => $minipanel) {
+        $contexts = array();
+        // Apply the required contexts.
+        foreach ($minipanel->requiredcontexts as $requiredcontext) {
+          switch ($requiredcontext['keyword']) {
+            // Context type is the same as the entity type.
+            case "$entity_type":
+              $contexts[] = ctools_context_create("entity:$entity_type", $entity);
+              break;
+
+            // Support product reference contexts.
+            case 'commerce_product':
+              // Make sure the field has values in the correct language
+              // @todo language
+              $items = field_get_items($entity_type, $entity, $field_product);
+              if (empty($items)) {
+                continue;
+              }
+              // Default to first product.
+              $item = reset($items);
+              $product = entity_load('commerce_product', array($item['product_id']));
+              if (!empty($product)) {
+                $product = reset($product);
+                $contexts[] = ctools_context_create('entity:commerce_product', $product);
+                // Dont cache minipanels with a commerce product reference, there's too many variables.
+                $no_cache = TRUE;
+              }
+              break;
+          }
+        }
+        // Apply the contexts.
+        $context = ctools_context_match_required_contexts($minipanel->requiredcontexts, $contexts);
+        $minipanel->context = $minipanel->display->context = ctools_context_load_contexts($minipanel, FALSE, $context);
+        $minipanel->display->css_id = panels_mini_get_id($minipanel->name);
+        // Store the rendered output.
+        $minipanels[$cache_key][$field_name] = panels_render_display($minipanel->display);
+      }
+
+      // Cache the results as long as it's supported.
+      if (!$no_cache) {
+        cache_set($cache_key, $minipanels[$cache_key], 'cache_field_minipanel');
+      }
+    }
+  }
+
+  // Output all the minipanel fields.
+  foreach ($minipanels[$cache_key] as $field_name => $minipanel) {
+    $minipanel = '<div class="field-minipanel-' . $field_name . '">' . $minipanel . '</div>';
+    $entity->content[$field_name] = array(
+      '#markup' => $minipanel,
+    );
+  }
+}
+
+/**
+ * Implements hook_entity_update().
+ *
+ * Clear the cache of all minipanel fields associated with this entity.
+ */
+function field_minipanel_entity_update($entity, $entity_type) {
+  list($entity_id, , $bundle) = entity_extract_ids($entity_type, $entity);
+  // Clear all view modes by skipping out the last :$view_mode
+  cache_clear_all("$entity_type:$bundle:$entity_id", 'cache_field_minipanel');
+}
+
+/**
+ * Implements hook_entity_delete().
+ *
+ * Clear the cache of all minipanel fields associated with this entity.
+ */
+function field_minipanel_entity_delete($entity, $entity_type) {
+  list($entity_id, , $bundle) = entity_extract_ids($entity_type, $entity);
+  // Clear all view modes by skipping out the last :$view_mode
+  cache_clear_all("$entity_type:$bundle:$entity_id", 'cache_field_minipanel');
+}
+
+/**
+ * Return all minipanels for specified display.
+ */
+function field_minipanel_get_minipanels($entity_type, $bundle, $view_mode) {
+  $minipanels = &drupal_static(__FUNCTION__);
+  $cache_key = "$entity_type:$bundle:$view_mode";
+  if (!isset($minipanels[$cache_key])) {
+    $minipanels[$cache_key] = array();
+    $extra_fields = _field_minipanel_get_fields($entity_type, $bundle, $view_mode);
+    foreach ($extra_fields as $field_name) {
+      // Load the minipanel for this display.
+      $minipanel = field_minipanel_load_minipanel($field_name, $entity_type, $bundle, $view_mode);
+      $minipanels[$cache_key][$field_name] = $minipanel;
+    }
+  }
+  return $minipanels[$cache_key];
+}
+
+/**
+ * Return the minipanel configured for the field.
+ */
+function field_minipanel_load_minipanel($field_name, $entity_type, $bundle, $view_mode) {
+  $minipanel_key = "$field_name:$entity_type:$bundle:$view_mode";
+  $minipanel_name = field_minipanel_get_config($minipanel_key);
+  if (!empty($minipanel_name)) {
+    return panels_mini_load($minipanel_name);
+  }
+  return FALSE;
+}
+
+/**
+ * Return the minipanel configured for the field.
+ */
+function field_minipanel_get_config($key = NULL) {
+  $settings = variable_get('field_minipanels_settings', array());
+  if (is_null($key)) {
+    return $settings;
+  }
+  if (!empty($settings[$key])) {
+    return $settings[$key];
+  }
+  return NULL;
+}
+
+/**
+ * Save a minipanel configuration.
+ */
+function field_minipanel_set_config($key, $value) {
+  $settings = field_minipanel_get_config();
+  if (!empty($value)) {
+    $settings[$key] = $value;
+  }
+  else {
+    unset($settings[$key]);
+  }
+  variable_set('field_minipanels_settings', $settings);
+}
+
+/**
+ * Get a list of available field_minipanel fields.
+ */
+function _field_minipanel_get_fields($entity_type, $bundle, $view_mode = NULL) {
+  $fields = &drupal_static(__FUNCTION__);
+  if (!isset($fields)) {
+    $fields = array();
+  }
+
+  $cache_key = "$entity_type:$bundle:$view_mode";
+  if (!isset($fields[$cache_key])) {
+    // Get all fields defined by the module.
+    $extra_fields = field_minipanel_field_extra_fields();
+
+    // Check that the bundle is supported.
+    if (empty($extra_fields[$entity_type][$bundle]['display'])) {
+      $extra_fields = array();
+    }
+    else {
+      // List of field names.
+      $extra_fields = array_keys($extra_fields[$entity_type][$bundle]['display']);
+      // Incase view mode wasnt specified and doesnt matter (eg node forms)
+      // simply return here.
+      if (!is_null($view_mode)) {
+        $config = field_bundle_settings($entity_type, $bundle);
+        foreach ($extra_fields as $idx => $field_name) {
+          $field_config = field_minipanel_get_config("$field_name:$entity_type:$bundle:$view_mode");
+          // Check that the field has been configured.
+          if (empty($field_config)) {
+            unset($extra_fields[$idx]);
+          }
+          // Check to make sure this field is visible in this view mode.
+          elseif (empty($config['extra_fields']['display'][$field_name][$view_mode]['visible'])) {
+            unset($extra_fields[$idx]);
+          }
+        }
+      }
+    }
+    // Statically cache the result as this might be invoked multiple times.
+    $fields[$cache_key] = $extra_fields;
+  }
+  return $fields[$cache_key];
+}
+
+/**
+ * Get the field name of the product reference field if it exists.
+ */
+function _field_minipanel_get_product_reference_field($entity_type, $bundle) {
+  $cache = &drupal_static(__FUNCTION__);
+  $cache_key = "$entity_type:$bundle";
+
+  if (!isset($cache[$cache_key])) {
+    $cache[$cache_key] = FALSE;
+
+    if (module_exists('commerce_product_reference')) {
+      $product_types = array_keys(commerce_product_reference_node_types());
+      $fields_info = field_info_field_map();
+
+      // Iterate over all product reference node types looking for the field.
+      foreach ($fields_info as $field_name => $field_info) {
+        if ($field_info['type'] != 'commerce_product_reference') {
+          continue;
+        }
+        if (!empty($field_info['bundles'][$entity_type]) && in_array($bundle, $field_info['bundles'][$entity_type])) {
+          $cache[$cache_key] = $field_name;
+          break;
+        }
+      }
+    }
+  }
+  return $cache[$cache_key];
+}

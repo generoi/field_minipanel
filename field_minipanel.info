@@ -1,0 +1,7 @@
+name = Field Minipanel
+description = Provide a pseudo display field to display a mini panel
+package = custom
+core = 7.x
+
+dependencies[] = panels
+dependencies[] = panels_mini
