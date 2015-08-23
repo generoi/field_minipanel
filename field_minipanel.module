@@ -23,15 +23,6 @@ function field_minipanel_node_view($entity, $view_mode, $langcode) {
   // @todo this doesnt take contexts into account, so cache bin might contain
   // duplicates but the performance improvement is worth it.
   $field_product = _field_minipanel_get_product_reference_field($entity_type, $bundle);
-  if ($field_product) {
-    // @todo language
-    $items = field_get_items($entity_type, $entity, $field_product);
-    $item = reset($items);
-    // On node views the product displayed is always the first one.
-    $product_id = $item['product_id'];
-    // If a product exists, use that in the cache key instead of the entity id.
-    $entity_id = $product_id;
-  }
 
   $minipanels = &drupal_static(__FUNCTION__);
   $cache_key = "$entity_type:$bundle:$entity_id:$view_mode";
